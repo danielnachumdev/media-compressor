@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 import re
 import shutil
@@ -63,25 +64,27 @@ class Compressor:
     def _is_folder(self, s: str) -> bool:
         return os.path.splitext(s)[1] == ''
 
-    def compress(self, input: str, output: str, preset: str, overwrite_existing: bool = True) -> None:
+    def compress(self, input: str, output: str, preset: str, *, overwrite: bool = False, cpu_utilization: float = 0.8) -> None:
         input = str(Path(input).resolve().absolute()).replace("\\", "/")
         output = str(Path(output).resolve().absolute()).replace("\\", "/")
         if not self._is_folder(input):
             if self._is_folder(output):
                 print("'input' is a file while 'output' is a folder. Aborting.")
                 exit()
-            self._compress_file(input, output, preset, overwrite_existing)
+            self._compress_file(input, output, preset,
+                                overwrite, cpu_utilization)
         else:
             if not self._is_folder(output):
                 print("'input' is a folder while 'output' is a file. Aborting.")
                 exit()
-            self._compress_folder(input, output, preset, overwrite_existing)
+            self._compress_folder(input, output, preset,
+                                  overwrite, cpu_utilization)
 
-    def _compress_folder(self, input: str, output: str, preset: str, overwrite_existing: bool = False) -> None:
+    def _compress_folder(self, input: str, output: str, preset: str, overwrite: bool = False, cpu_utilization: float = 1.0) -> None:
         APPROVED_EXTENSIONS = {
             ".mp4", ".avi", ".mov", ".mkv", ".jpg", ".jpeg", ".png", ".tiff", ".cr2"
         }
-        if overwrite_existing:
+        if overwrite:
             if os.path.exists(output):
                 shutil.rmtree(output)
         os.makedirs(output, exist_ok=True)
@@ -92,18 +95,17 @@ class Compressor:
                 for file in (pbar := tqdm(files, total=len(files), position=0, desc=f"Files in {input}")):
                     name, ext = os.path.splitext(file)
                     file_input = os.path.join(input, file)
-                    file_output = os.path.join(
-                        output, f"{name} - COMPRESSED{ext}")
-                    if os.path.exists(file_output) and not overwrite_existing:
+                    file_output = os.path.join(output, f"{name}{ext}")
+                    if os.path.exists(file_output) and not overwrite:
                         continue
                     self._compress_file(file_input, file_output,
-                                        preset, overwrite_existing, pbar)
+                                        preset, overwrite, pbar, cpu_utilization)
             else:
                 print(
                     "No applicable files found. try files with the following extensions:", APPROVED_EXTENSIONS)
             break
 
-    def _compress_file(self, input: str, output: str, preset: str, overwrite_existing: bool = False, prev_pbar: Optional[tqdm] = None) -> None:
+    def _compress_file(self, input: str, output: str, preset: str, overwrite: bool = False, prev_pbar: Optional[tqdm] = None, cpu_utilization: float = 1.0) -> None:
         """
         Determines the file type (video or image) and compresses accordingly.
 
@@ -116,7 +118,7 @@ class Compressor:
         output = str(Path(output).resolve().absolute()).replace("\\", "/")
 
         if os.path.exists(output):
-            if overwrite_existing:
+            if overwrite:
                 os.remove(output)
             else:
                 print(
@@ -129,15 +131,15 @@ class Compressor:
         if ext in [".mp4", ".avi", ".mov", ".mkv"]:  # Common video extensions
             # Compress video
             self._compress_video_with_progress(
-                input, output, FFMPEGCompressionPreset.from_string(preset), prev_pbar)
+                input, output, FFMPEGCompressionPreset.from_string(preset), prev_pbar, cpu_utilization)
         elif ext in [".jpg", ".jpeg", ".png", ".tiff", ".cr2"]:  # Common image extensions
             # Compress image (losslessly or lossy)
             self._compress_image(
-                input, output, FFMPEGCompressionPreset.from_string(preset), prev_pbar)
+                input, output, FFMPEGCompressionPreset.from_string(preset), prev_pbar, cpu_utilization)
         else:
             print(f"Unsupported file format: {ext}")
 
-    def _compress_video_with_progress(self, input_path: str, output_path: str, preset: FFMPEGCompressionPreset, prev_pbar: Optional[tqdm] = None):
+    def _compress_video_with_progress(self, input_path: str, output_path: str, preset: FFMPEGCompressionPreset, prev_pbar: Optional[tqdm] = None, cpu_utilization: float = 1.0):
         """
         Compresses a video using ffmpeg-python and displays a progress bar.
 
@@ -162,11 +164,11 @@ class Compressor:
                 .output(
                     output_path,
                     vcodec="libx264",
-                    crf=18,
+                    crf=23,
                     preset=preset.value,
                     acodec="aac",
                     audio_bitrate="128k",
-                    threads=os.cpu_count()
+                    threads=math.floor(os.cpu_count()*cpu_utilization)
                 )
                 .compile()
             )
@@ -201,7 +203,7 @@ class Compressor:
         except Exception as e:
             log(f"An error occurred: {e}")
 
-    def _compress_image(self, input_path: str, output_path: str, preset: FFMPEGCompressionPreset, pbar_pos: int = 0):
+    def _compress_image(self, input_path: str, output_path: str, preset: FFMPEGCompressionPreset, prev_pbar: Optional[tqdm] = None, cpu_utilization: float = 1.0):
         """
         Compresses an image losslessly or lossy using ffmpeg, Pillow (based on the file type), or rawpy (for CR2 files).
 

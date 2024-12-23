@@ -15,7 +15,7 @@
                 "./data",
                 "./output",
                 "veryslow",
-                "overwrite_existing=True"
+                "--overwrite",
             ]
         }
     ]
