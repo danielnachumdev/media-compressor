@@ -178,6 +178,10 @@ class FFMPEGImageCompressor(ImageCompressor):
         :param output_path: Path to save the compressed image.
         :param preset: Compression preset for image compression.
         """
+        log = print
+        if prev_pbar:
+            log = prev_pbar.write
+
         input_ext = os.path.splitext(src)[1].lower()
         extra_kwargs = []
         if input_ext in [".jpg", ".jpeg"]:
@@ -185,21 +189,28 @@ class FFMPEGImageCompressor(ImageCompressor):
         elif input_ext == ".png":
             # Adjust compression level for PNG
             extra_kwargs = {"compression_level": "10"}
-        command: List[str] = (
-            ffmpeg
-            .input(src)
-            .output(
-                dst,
-                preset=preset.value,
-                threads=max(1, math.floor(os.cpu_count()*utilization)),
-                **extra_kwargs
+
+        try:
+            command: List[str] = (
+                ffmpeg
+                .input(src)
+                .output(
+                    dst,
+                    preset=preset.value,
+                    threads=max(1, math.floor(os.cpu_count()*utilization)),
+                    **extra_kwargs
+                )
+                .compile()
             )
-            .compile()
-        )
-        # Run FFmpeg with progress monitoring
-        process = subprocess.Popen(
-            command, stderr=subprocess.PIPE, universal_newlines=True)
-        process.wait()
+            # Run FFmpeg with progress monitoring
+            process = subprocess.Popen(
+                command, stderr=subprocess.PIPE, universal_newlines=True)
+            process.wait()
+        except ffmpeg.Error as e:
+            log(f"Error during compression: {e.stderr.decode()}")
+
+        except Exception as e:
+            log(f"An error occurred: {e}")
 
 
 class FFMPEGVideoCompressor(VideoCompressor):
