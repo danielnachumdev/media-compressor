@@ -12,7 +12,7 @@
             "program": "compress.py",
             "console": "integratedTerminal",
             "args": [
-                "./data",
+                "C:\\Users\\User\\Downloads\\magnet photos\\משפחתיות",
                 "./output",
                 "veryslow",
                 "--overwrite",

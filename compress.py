@@ -1,12 +1,13 @@
 import math
-from pathlib import Path
 import re
 import shutil
 import sys
 import os
 import subprocess
+from pathlib import Path
 from enum import Enum
-from typing import List, Literal, Optional
+from abc import ABC, abstractmethod
+from typing import Dict, Hashable, Iterable, List, Literal, Optional, Set, Tuple
 
 failed_imports: List[str] = []
 try:
@@ -60,86 +61,149 @@ class ImageCompressionPreset(Enum):
     LOW = "low"
 
 
-class Compressor:
-    def _is_folder(self, s: str) -> bool:
-        return os.path.splitext(s)[1] == ''
+class Compressor(ABC):
 
-    def compress(self, input: str, output: str, preset: str, *, overwrite: bool = False, cpu_utilization: float = 0.8) -> None:
-        input = str(Path(input).resolve().absolute()).replace("\\", "/")
-        output = str(Path(output).resolve().absolute()).replace("\\", "/")
-        if not self._is_folder(input):
-            if self._is_folder(output):
-                print("'input' is a file while 'output' is a folder. Aborting.")
-                exit()
-            self._compress_file(input, output, preset,
-                                overwrite, cpu_utilization)
-        else:
-            if not self._is_folder(output):
-                print("'input' is a folder while 'output' is a file. Aborting.")
-                exit()
-            self._compress_folder(input, output, preset,
-                                  overwrite, cpu_utilization)
+    @abstractmethod
+    def compress(self, src: str, dst: str, preset: str, *,
+                 overwrite: bool = False, cpu_utilization: float = 0.8, **kwargs) -> None: ...
 
-    def _compress_folder(self, input: str, output: str, preset: str, overwrite: bool = False, cpu_utilization: float = 1.0) -> None:
+
+class FolderCompressor(Compressor):
+    def __init__(self, file_compressor: 'FileCompressor'):
+        self.file_compressor = file_compressor
+
+    def compress(self, src: str, dst: str, preset: str, *,
+                 overwrite: bool = False, utilization: float = 0.8) -> None:
         APPROVED_EXTENSIONS = {
             ".mp4", ".avi", ".mov", ".mkv", ".jpg", ".jpeg", ".png", ".tiff", ".cr2"
         }
         if overwrite:
-            if os.path.exists(output):
-                shutil.rmtree(output)
-        os.makedirs(output, exist_ok=True)
-        for parentdir, subdirs, files in os.walk(input):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+        os.makedirs(dst, exist_ok=True)
+        for parentdir, subdirs, files in os.walk(src):
             files = list(filter(lambda f: os.path.splitext(f)
                          [1] in APPROVED_EXTENSIONS, files))
-            if files:
-                for file in (pbar := tqdm(files, total=len(files), position=0, desc=f"Files in {input}")):
-                    name, ext = os.path.splitext(file)
-                    file_input = os.path.join(input, file)
-                    file_output = os.path.join(output, f"{name}{ext}")
-                    if os.path.exists(file_output) and not overwrite:
-                        continue
-                    self._compress_file(file_input, file_output,
-                                        preset, overwrite, pbar, cpu_utilization)
-            else:
-                print(
-                    "No applicable files found. try files with the following extensions:", APPROVED_EXTENSIONS)
             break
+        if not files:
+            print(
+                "No applicable files found. try files with the following extensions:", APPROVED_EXTENSIONS)
+            exit()
+        for file in (pbar := tqdm(files, total=len(files), position=0, desc=f"Files in {src}")):
+            name, ext = os.path.splitext(file)
+            updated_src = os.path.join(src, file)
+            updated_dst = os.path.join(dst, f"{name}{ext}")
+            if os.path.exists(dst) and not overwrite:
+                continue
+            self.file_compressor.compress(updated_src, updated_dst,
+                                          preset, overwrite=overwrite, prev_pbar=pbar, utilization=utilization)
 
-    def _compress_file(self, input: str, output: str, preset: str, overwrite: bool = False, prev_pbar: Optional[tqdm] = None, cpu_utilization: float = 1.0) -> None:
-        """
-        Determines the file type (video or image) and compresses accordingly.
 
-        :param input: Input file path.
-        :param output: Output file path.
-        :param preset: Compression preset for video/image compression.
-        :param overwrite_existing: Whether to overwrite an existing output file.
-        """
-        input = str(Path(input).resolve().absolute()).replace("\\", "/")
-        output = str(Path(output).resolve().absolute()).replace("\\", "/")
+class FileCompressor(Compressor):
+    @abstractmethod
+    def compress(self, src, dst, preset, *, overwrite=False,
+                 prev_pbar: Optional[tqdm] = None, utilization=0.8): ...
 
-        if os.path.exists(output):
-            if overwrite:
-                os.remove(output)
-            else:
-                print(
-                    f"'{output}' already exists. aborting. try adding 'overwrite_existing=True'")
-                exit()
 
-        _, ext = os.path.splitext(input)
-        ext = ext.lower()
+class SwitchCompressor(FileCompressor):
+    def __init__(self, mapping: Dict[Tuple[str, ...], FileCompressor], default: Optional[FileCompressor] = None):
+        self.mapping = mapping
+        self.default = default
 
-        if ext in [".mp4", ".avi", ".mov", ".mkv"]:  # Common video extensions
-            # Compress video
-            self._compress_video_with_progress(
-                input, output, FFMPEGCompressionPreset.from_string(preset), prev_pbar, cpu_utilization)
-        elif ext in [".jpg", ".jpeg", ".png", ".tiff", ".cr2"]:  # Common image extensions
-            # Compress image (losslessly or lossy)
-            self._compress_image(
-                input, output, FFMPEGCompressionPreset.from_string(preset), prev_pbar, cpu_utilization)
+    def compress(self, src: str, *args, **kwargs):
+        _, ext = os.path.splitext(src)
+        all_extensions = set()
+        for extensions, compressor in self.mapping.items():
+            all_extensions.update(extensions)
+            if ext in extensions:
+                compressor.compress(src, *args, **kwargs)
+                break
         else:
-            print(f"Unsupported file format: {ext}")
+            if not self.default:
+                print(f"Invalid extension '{ext}' not in {all_extensions}")
+            else:
+                self.default.compress(src, *args, **kwargs)
 
-    def _compress_video_with_progress(self, input_path: str, output_path: str, preset: FFMPEGCompressionPreset, prev_pbar: Optional[tqdm] = None, cpu_utilization: float = 1.0):
+
+class ObjectCompressor(Compressor):
+    def __init__(self, file_compressor: 'FileCompressor'):
+        self.folder_compressor = FolderCompressor(file_compressor)
+        self.file_compressor = file_compressor
+
+    def _is_folder(self, s: str) -> bool:
+        return os.path.splitext(s)[1] == ''
+
+    def compress(self, src: str, dst: str, preset: str, *,
+                 overwrite: bool = False, utilization: float = 0.8):
+        utilization = max(0.1, min(utilization, 1.0))
+        src = str(Path(src).resolve().absolute())
+        dst = str(Path(dst).resolve().absolute())
+        explorer_target = dst
+        if not self._is_folder(src):
+            if self._is_folder(dst):
+                print(
+                    "'src' is a file while 'dst' is a folder. Aborting.")
+                exit()
+            explorer_target = str(Path(dst).resolve().absolute().parent)
+            self.file_compressor.compress(
+                src, dst, preset, overwrite=overwrite, utilization=utilization)
+        else:
+            if not self._is_folder(dst):
+                print(
+                    "'src' is a folder while 'dst' is a file. Aborting.")
+                exit()
+            self.folder_compressor.compress(
+                src, dst, FFMPEGCompressionPreset.from_string(preset), overwrite=overwrite, utilization=utilization)
+
+        cmd = "open"
+        if sys.platform == "win32":
+            cmd = "start"
+        os.system(f"{cmd} {explorer_target}")
+
+
+class VideoCompressor(FileCompressor):
+    ...
+
+
+class ImageCompressor(FileCompressor):
+    ...
+
+
+class FFMPEGImageCompressor(ImageCompressor):
+    def compress(self, src: str, dst: str, preset: FFMPEGCompressionPreset, *, overwrite: bool = False, prev_pbar: Optional[tqdm] = None, utilization: float = 1.0):
+        """
+        Compresses an image losslessly or lossy using ffmpeg, Pillow (based on the file type), or rawpy (for CR2 files).
+
+        :param input_path: Path to the input image file.
+        :param output_path: Path to save the compressed image.
+        :param preset: Compression preset for image compression.
+        """
+        input_ext = os.path.splitext(src)[1].lower()
+        extra_kwargs = []
+        if input_ext in [".jpg", ".jpeg"]:
+            extra_kwargs = {"qscale:v": "2"}  # Adjust quality for JPEG
+        elif input_ext == ".png":
+            # Adjust compression level for PNG
+            extra_kwargs = {"compression_level": "10"}
+        command: List[str] = (
+            ffmpeg
+            .input(src)
+            .output(
+                dst,
+                preset=preset.value,
+                threads=max(1, math.floor(os.cpu_count()*utilization)),
+                **extra_kwargs
+            )
+            .compile()
+        )
+        # Run FFmpeg with progress monitoring
+        process = subprocess.Popen(
+            command, stderr=subprocess.PIPE, universal_newlines=True)
+        process.wait()
+
+
+class FFMPEGVideoCompressor(VideoCompressor):
+    def compress(self, src: str, dst: str, preset: FFMPEGCompressionPreset, *, prev_pbar: Optional[tqdm] = None, cpu_utilization: float = 1.0):
         """
         Compresses a video using ffmpeg-python and displays a progress bar.
 
@@ -154,21 +218,21 @@ class Compressor:
 
         try:
             # Get video duration in seconds
-            probe = ffmpeg.probe(input_path)
+            probe = ffmpeg.probe(src)
             duration_in_seconds = float(probe['format']['duration'])
             filename = probe["format"]["filename"]
             # Build FFmpeg command
             command: List[str] = (
                 ffmpeg
-                .input(input_path)
+                .input(src)
                 .output(
-                    output_path,
+                    dst,
                     vcodec="libx264",
                     crf=23,
                     preset=preset.value,
                     acodec="aac",
                     audio_bitrate="128k",
-                    threads=math.floor(os.cpu_count()*cpu_utilization)
+                    threads=max(1, math.floor(os.cpu_count()*cpu_utilization))
                 )
                 .compile()
             )
@@ -191,31 +255,26 @@ class Compressor:
                     pbar.n = pbar.total
                     pbar.refresh()
                     log(
-                        f"Video compressed successfully and saved to: {output_path}")
+                        f"Video compressed successfully and saved to: {dst}")
                 else:
                     pbar.leave = False
                     cmd = " ".join(command)
                     log(
-                        f"[ERROR] Failed processing {input_path}. Try running manually with:\n\t{cmd}")
+                        f"[ERROR] Failed processing {src}. Try running manually with:\n\t{cmd}")
         except ffmpeg.Error as e:
             log(f"Error during compression: {e.stderr.decode()}")
 
         except Exception as e:
             log(f"An error occurred: {e}")
 
-    def _compress_image(self, input_path: str, output_path: str, preset: FFMPEGCompressionPreset, prev_pbar: Optional[tqdm] = None, cpu_utilization: float = 1.0):
-        """
-        Compresses an image losslessly or lossy using ffmpeg, Pillow (based on the file type), or rawpy (for CR2 files).
 
-        :param input_path: Path to the input image file.
-        :param output_path: Path to save the compressed image.
-        :param preset: Compression preset for image compression.
-        """
-        pass
+class Main(ObjectCompressor):
+    def __init__(self):
+        super().__init__(SwitchCompressor({
+            tuple([".mp4", ".avi", ".mov", ".mkv"]): FFMPEGVideoCompressor(),
+            tuple([".jpg", ".jpeg", ".png", ".tiff", ".cr2"]): FFMPEGImageCompressor()
+        }))
 
 
-__all__ = [
-    "Compressor"
-]
 if __name__ == "__main__":
-    Fire(Compressor().compress)
+    Fire(Main().compress)
